@@ -1,14 +1,10 @@
 # Use the official Fluentd image
-FROM fluent/fluentd:latest
+FROM fluent/fluentd:edge-debian
 
 # Install necessary plugins
 USER root
 
-# Install Azure plugins (choose the one you need)
-# For Azure Blob Storage
-RUN fluent-gem install fluent-plugin-azure-storage-append-blob
-
-# For Azure Event Hubs
+# Install the Azure Event Hubs plugin
 RUN fluent-gem install fluent-plugin-azure-eventhubs
 
 # Clean up
