@@ -1,0 +1,127 @@
+services:
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning
+      - grafana_data:/var/lib/grafana
+    networks:
+      - logging
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:3000/api/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  loki:
+    image: grafana/loki:3.2.0
+    container_name: loki
+    command: -config.file=/etc/loki/loki-config.yaml
+    ports:
+      - "3100:3100"
+    volumes:
+      - ./loki/config:/etc/loki
+      - ./loki/data:/loki
+      - ./loki/wal:/wal
+    networks:
+      - logging
+    restart: unless-stopped
+    user: "10001:10001"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --tries=1 -O- http://localhost:3100/ready || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    environment:
+      - JAEGER_AGENT_HOST=tempo
+      - JAEGER_SAMPLING_SERVER_URL=http://tempo:16686/sampling
+
+  fluentd:
+    image: grafana/fluent-plugin-loki:main
+    container_name: fluentd
+    ports:
+      - "5140:5140/tcp"
+      - "5140:5140/udp"
+    volumes:
+      - ./fluentd/conf:/fluentd/etc
+    environment:
+      LOKI_URL: http://loki:3100
+      LOKI_USERNAME: ""
+      LOKI_PASSWORD: ""
+    depends_on:
+      loki:
+        condition: service_healthy
+    networks:
+      - logging
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep fluentd || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+
+  rsyslog:
+    image: ubuntu:24.04
+    container_name: rsyslog
+    ports:
+      - "514:514/tcp"
+      - "514:514/udp"
+    volumes:
+      - ./rsyslog/rsyslog.conf:/etc/rsyslog.conf:ro
+      - ./rsyslog/logs:/var/log
+      - ./scripts:/scripts
+    environment:
+      - DEBIAN_FRONTEND=noninteractive
+    command: >
+      bash -c "apt-get update && 
+               apt-get install -y rsyslog netcat-openbsd procps -o Dpkg::Options::='--force-confdef' -o Dpkg::Options::='--force-confold' && 
+               rm -f /var/run/rsyslogd.pid &&
+               rsyslogd -n"
+    depends_on:
+      fluentd:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "ps aux | grep rsyslogd | grep -v grep || exit 1 && nc -z localhost 514 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks:
+      - logging
+
+  log-generator:
+    image: python:3.12
+    container_name: log-generator
+    volumes:
+      - ./scripts:/scripts
+    command: >
+      bash -c "apt-get update &&
+               apt-get install -y netcat-traditional &&
+               pip install python-json-logger termcolor &&
+               chmod +x /scripts/generate_logs.py &&
+               until nc -z rsyslog 514; do echo 'Waiting for rsyslog...'; sleep 1; done &&
+               python3 /scripts/generate_logs.py"
+    depends_on:
+      rsyslog:
+        condition: service_healthy
+    networks:
+      - logging
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f generate_logs.py || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+networks:
+  logging:
+    driver: bridge
+
+volumes:
+  grafana_data:
